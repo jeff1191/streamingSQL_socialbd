@@ -18,13 +18,20 @@ package ucm.socialbigdata.com
  * limitations under the License.
  */
 
+import java.net.{InetAddress, InetSocketAddress}
+import java.util
 import java.util.Date
 
 import org.apache.flink.streaming.api.scala._
+import org.apache.flink.streaming.connectors.elasticsearch.{ElasticsearchSink, ElasticsearchSinkFunction}
 import org.apache.flink.table.api.{Table, TableEnvironment}
 import org.apache.flink.table.api.scala._
 import org.apache.flink.table.expressions.ExpressionParser
 import org.apache.flink.types.Row
+import org.elasticsearch.action.index.IndexRequest
+import org.elasticsearch.client.Requests
+import ucm.socialbigdata.com.config.SocialBDProperties
+import ucm.socialbigdata.com.elasticsearch.SimpleElasticsearchSink
 import ucm.socialbigdata.com.operations.RowToJSONMap
 
 import scala.collection.JavaConverters._
@@ -41,7 +48,11 @@ object StreamingSQLJob {
   case class GroupHour(hora:String, valor:String, isValid:String)
 
   def main(args: Array[String]) {
-    
+
+
+    val socialBDProperties = new SocialBDProperties(args(0))
+
+
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     val tableEnv = TableEnvironment.getTableEnvironment(env);
 
@@ -55,9 +66,9 @@ object StreamingSQLJob {
 
     val originDataStream = env.fromCollection(airCollection.toSeq)
 
-    tableEnv.registerDataStream("pruebaDataStream", originDataStream, 'estacion , 'magnitud, 'tecnica, 'horario, 'fecha, 'listaHoras)
+    tableEnv.registerDataStream(socialBDProperties.topic, originDataStream, 'estacion , 'magnitud, 'tecnica, 'horario, 'fecha, 'listaHoras)
 
-    val query = "SELECT estacion FROM pruebaDataStream".replace("SELECT","select").replace("Select","select").replace("FROM","from").replace("From","from")
+    val query = socialBDProperties.query.replace("SELECT","select").replace("Select","select").replace("FROM","from").replace("From","from")
 
 
     val pattern = """select(.*)from""".r
@@ -69,16 +80,27 @@ object StreamingSQLJob {
       m => fields = m.group(1)
     }
 
-
-
-    // union the two tables
     val resultTable = tableEnv.sqlQuery(query).toRetractStream[Row]
 
-    val jsonDataStream = resultTable.map(_._2).map(new RowToJSONMap(fields.split(",").toList))
+    val jsonDataStream : DataStream[String] = resultTable.map(_._2).map(new RowToJSONMap(fields.split(",").toList))
 
     jsonDataStream.print()
+    val config = getElasticConfiguration(socialBDProperties)
 
+//    val transports = new java.util.ArrayList[InetSocketAddress]
+//    transports.add(new InetSocketAddress(InetAddress.getByName(socialBDProperties.elasticUrl), socialBDProperties.elasticPort))
+
+    jsonDataStream.addSink(new ElasticsearchSink[String](config,
+      new SimpleElasticsearchSink(socialBDProperties.elasticIndex, socialBDProperties.elasticType)))
     // execute program
     env.execute("Flink SQL SocialBigData-CM")
+  }
+
+  def getElasticConfiguration(socialBDProperties: SocialBDProperties): util.HashMap[String, String] = {
+    val config = new java.util.HashMap[String, String]
+    config.put("bulk.flush.max.actions", "1")
+    config.put("cluster.name", socialBDProperties.elasticClusterName)
+    config.put("node.name", socialBDProperties.elasticNodeName)
+    config
   }
 }
